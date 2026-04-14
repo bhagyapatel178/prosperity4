@@ -28,3 +28,4 @@ dist/
 # Data
 data/
 datasets/
+logs/
