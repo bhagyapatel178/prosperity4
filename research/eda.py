@@ -1,67 +1,75 @@
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-
-# Change this to your actual filename
-PRICE_FILE = "prices_round_1_day_-1.csv"
+PRICE_FILE = "prices_round_1_day_-2.csv"   # change if needed
 
 df = pd.read_csv(DATA_DIR / PRICE_FILE, sep=";")
 
-print("Columns:")
-print(df.columns.tolist())
-print("\nProducts:")
-print(df["product"].unique())
+for col in ["bid_price_1", "ask_price_1", "mid_price"]:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
 
 products = ["INTARIAN_PEPPER_ROOT", "ASH_COATED_OSMIUM"]
 
 for product in products:
     pdf = df[df["product"] == product].copy()
 
-    if pdf.empty:
-        print(f"\nNo data found for {product}")
-        continue
+    # valid top-of-book rows only
+    pdf["valid_book"] = pdf["bid_price_1"].notna() & pdf["ask_price_1"].notna()
 
-    # Spread from best bid / ask
-    pdf["spread"] = pdf["ask_price_1"] - pdf["bid_price_1"]
+    # rebuild mid from best bid/ask when both exist
+    pdf["mid_clean"] = np.where(
+        pdf["valid_book"],
+        (pdf["bid_price_1"] + pdf["ask_price_1"]) / 2,
+        np.nan
+    )
 
-    # Rolling behaviour
-    pdf["mid_ma_20"] = pdf["mid_price"].rolling(20).mean()
-    pdf["mid_ma_100"] = pdf["mid_price"].rolling(100).mean()
-    pdf["mid_std_20"] = pdf["mid_price"].rolling(20).std()
+    pdf["spread"] = np.where(
+        pdf["valid_book"],
+        pdf["ask_price_1"] - pdf["bid_price_1"],
+        np.nan
+    )
 
-    print(f"\n===== {product} =====")
-    print(pdf[["timestamp", "bid_price_1", "ask_price_1", "mid_price", "spread"]].head())
-    print("\nSummary stats:")
-    print(pdf[["mid_price", "spread"]].describe())
+    # for plotting smooth behaviour
+    pdf["mid_ffill"] = pd.Series(pdf["mid_clean"]).ffill()
+    pdf["ma_20"] = pdf["mid_ffill"].rolling(20).mean()
+    pdf["ma_100"] = pdf["mid_ffill"].rolling(100).mean()
+    pdf["ret_1"] = pdf["mid_ffill"].diff()
+    pdf["rolling_std_20"] = pdf["ret_1"].rolling(20).std()
 
-    # Mid price + moving averages
+    clean = pdf[pdf["valid_book"]].copy()
+
+    print(f"\n===== {product} CLEANED =====")
+    print(clean[["mid_clean", "spread"]].describe())
+
+    # zoomed mid plot
     plt.figure(figsize=(12, 5))
-    plt.plot(pdf["timestamp"], pdf["mid_price"], label="mid_price")
-    plt.plot(pdf["timestamp"], pdf["mid_ma_20"], label="ma_20")
-    plt.plot(pdf["timestamp"], pdf["mid_ma_100"], label="ma_100")
-    plt.title(f"{product} - Mid Price")
+    plt.plot(pdf["timestamp"], pdf["mid_ffill"], label="mid_ffill")
+    plt.plot(pdf["timestamp"], pdf["ma_20"], label="ma_20")
+    plt.plot(pdf["timestamp"], pdf["ma_100"], label="ma_100")
+    plt.title(f"{product} - Cleaned Mid Price")
     plt.xlabel("timestamp")
     plt.ylabel("price")
     plt.legend()
     plt.tight_layout()
     plt.show()
 
-    # Spread
+    # spread plot
     plt.figure(figsize=(12, 4))
-    plt.plot(pdf["timestamp"], pdf["spread"], label="spread")
-    plt.title(f"{product} - Spread")
+    plt.plot(clean["timestamp"], clean["spread"], label="spread")
+    plt.title(f"{product} - Cleaned Spread")
     plt.xlabel("timestamp")
     plt.ylabel("spread")
     plt.legend()
     plt.tight_layout()
     plt.show()
 
-    # Short-term volatility proxy
+    # returns volatility
     plt.figure(figsize=(12, 4))
-    plt.plot(pdf["timestamp"], pdf["mid_std_20"], label="rolling std 20")
-    plt.title(f"{product} - Rolling Volatility")
+    plt.plot(pdf["timestamp"], pdf["rolling_std_20"], label="rolling std of returns")
+    plt.title(f"{product} - Rolling Volatility of Returns")
     plt.xlabel("timestamp")
     plt.ylabel("std")
     plt.legend()
