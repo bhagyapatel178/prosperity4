@@ -16,14 +16,22 @@ POSITION_LIMITS = {
 }
 
 # Pepper Root: near-deterministic upward trend
-PEPPER_SLOPE = 0.001          # fair value rises by ~0.001 per timestamp unit
-PEPPER_ANCHOR_ALPHA = 0.20    # smoothing for anchor estimate
-PEPPER_TREND_BIAS = 4.0       # upward bias in reservation price
-PEPPER_INV_PENALTY = 0.05     # reservation price penalty per unit inventory
-PEPPER_TAKE_EDGE = 1.0        # only cross if price is clearly good
-PEPPER_PASSIVE_OFFSET = 3.0   # quote inside spread around fair
+PEPPER_SLOPE = 0.001
+PEPPER_ANCHOR_ALPHA = 0.20
+PEPPER_TREND_BIAS = 4.0
+PEPPER_INV_PENALTY = 0.05
+PEPPER_TAKE_EDGE = 1.0
+PEPPER_PASSIVE_OFFSET = 3.0
 PEPPER_PASSIVE_BID_SIZE = 12
-PEPPER_PASSIVE_ASK_SIZE = 6   # smaller ask size keeps a mild long bias
+PEPPER_PASSIVE_ASK_SIZE = 6
+
+# v1.1 small Pepper tweaks
+PEPPER_EARLY_TS = 30000
+PEPPER_EARLY_TARGET = 24          # modest early long target
+PEPPER_EARLY_EXTRA_BUY = 1.0      # allow slightly earlier buying
+PEPPER_EARLY_BID_OFFSET = 2.0     # tighter passive bid early
+PEPPER_EARLY_BID_SIZE = 16        # larger passive bid early
+PEPPER_EARLY_ASK_SIZE = 4         # smaller passive ask early
 
 # Osmium: strong short-horizon mean reversion
 OSMIUM_MEANREV_ALPHA = 0.90
@@ -144,15 +152,23 @@ class Trader:
             pepper_anchor = (1 - PEPPER_ANCHOR_ALPHA) * prev_anchor + PEPPER_ANCHOR_ALPHA * observed_anchor
         cache["pepper_anchor"] = pepper_anchor
 
-        # Reservation price / fair value
         fair = pepper_anchor + PEPPER_SLOPE * state.timestamp
         fair += PEPPER_TREND_BIAS
         fair -= PEPPER_INV_PENALTY * position
 
+        is_early = state.timestamp < PEPPER_EARLY_TS
+        under_early_target = position < PEPPER_EARLY_TARGET
+
+        # Early in the run, be slightly more willing to buy if we still have not built
+        # a modest long position.
+        pepper_take_threshold = fair - PEPPER_TAKE_EDGE
+        if is_early and under_early_target:
+            pepper_take_threshold = fair - PEPPER_TAKE_EDGE + PEPPER_EARLY_EXTRA_BUY
+
         # Aggressively take clearly good asks
         for ask_price in sorted(order_depth.sell_orders.keys()):
-            ask_qty = -order_depth.sell_orders[ask_price]  # sell side volumes are negative
-            if ask_price <= fair - PEPPER_TAKE_EDGE:
+            ask_qty = -order_depth.sell_orders[ask_price]
+            if ask_price <= pepper_take_threshold:
                 buy_used = self.try_buy(
                     orders, product, ask_price, ask_qty, buy_capacity, buy_used
                 )
@@ -167,7 +183,16 @@ class Trader:
 
         # Passive quoting if both sides exist
         if best_bid is not None and best_ask is not None and best_bid < best_ask:
-            passive_bid = min(best_bid + 1, math.floor(fair - PEPPER_PASSIVE_OFFSET))
+            passive_offset = PEPPER_PASSIVE_OFFSET
+            passive_bid_size = PEPPER_PASSIVE_BID_SIZE
+            passive_ask_size = PEPPER_PASSIVE_ASK_SIZE
+
+            if is_early and under_early_target:
+                passive_offset = PEPPER_EARLY_BID_OFFSET
+                passive_bid_size = PEPPER_EARLY_BID_SIZE
+                passive_ask_size = PEPPER_EARLY_ASK_SIZE
+
+            passive_bid = min(best_bid + 1, math.floor(fair - passive_offset))
             passive_ask = max(best_ask - 1, math.ceil(fair + PEPPER_PASSIVE_OFFSET))
 
             # Make sure passive quotes do not cross
@@ -176,7 +201,7 @@ class Trader:
                     orders,
                     product,
                     int(passive_bid),
-                    PEPPER_PASSIVE_BID_SIZE,
+                    passive_bid_size,
                     buy_capacity,
                     buy_used,
                 )
@@ -186,7 +211,7 @@ class Trader:
                     orders,
                     product,
                     int(passive_ask),
-                    PEPPER_PASSIVE_ASK_SIZE,
+                    passive_ask_size,
                     sell_capacity,
                     sell_used,
                 )
